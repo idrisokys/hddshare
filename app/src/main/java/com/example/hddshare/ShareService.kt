@@ -33,6 +33,7 @@ class ShareService : Service() {
     private var screenLock: PowerManager.WakeLock? = null
     private var lastText: String? = null
     @Volatile private var running = false
+    private var missCount = 0
 
     private val tick = object : Runnable {
         override fun run() {
@@ -84,8 +85,12 @@ class ShareService : Service() {
     @Synchronized
     private fun syncServer() {
         val hasDisk = Volumes.list(applicationContext).isNotEmpty()
+        // Disk tek seferlik başarısız kontrolde "yok" sayılmaz; art arda MISS_LIMIT kez
+        // görünmezse sunucu kapanır. Böylece bozuk dosya okunurken oluşan anlık I/O
+        // hatası tüm bağlantıyı koparmaz.
+        if (hasDisk) missCount = 0 else missCount++
         if (hasDisk && server == null) startServer()
-        else if (!hasDisk && server != null) stopServer()
+        else if (!hasDisk && server != null && missCount >= MISS_LIMIT) stopServer()
         updateNotification()
     }
 
@@ -189,5 +194,6 @@ class ShareService : Service() {
     companion object {
         private const val TAG = "HDDShare"
         private const val NOTIF_ID = 1
+        private const val MISS_LIMIT = 4
     }
 }

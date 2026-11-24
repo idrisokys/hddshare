@@ -8,14 +8,13 @@ import java.io.File
 object Volumes {
 
     private fun usable(f: File): Boolean {
-        if (!f.isDirectory || !f.canRead()) return false
+        if (!f.isDirectory) return false
         val st = try { Environment.getExternalStorageState(f) } catch (e: Exception) { Environment.MEDIA_UNKNOWN }
-        val stateOk = st == Environment.MEDIA_MOUNTED ||
-            st == Environment.MEDIA_MOUNTED_READ_ONLY ||
-            st == Environment.MEDIA_UNKNOWN
-        if (!stateOk) return false
-        // Okunamayan / yarı çıkmış birimleri ele
-        return f.listFiles() != null
+        // Sistem "bağlı" diyorsa diske ekstra dokunma (listFiles bozuk dosya okunurken
+        // geçici olarak null/boş dönüp sunucuyu yanlışlıkla kapatıyordu).
+        if (st == Environment.MEDIA_MOUNTED || st == Environment.MEDIA_MOUNTED_READ_ONLY) return true
+        if (st != Environment.MEDIA_UNKNOWN) return false
+        return f.canRead() && f.listFiles() != null
     }
 
     fun list(ctx: Context): List<File> {

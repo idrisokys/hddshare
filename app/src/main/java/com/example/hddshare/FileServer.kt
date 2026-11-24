@@ -3,13 +3,17 @@ package com.example.hddshare
 import android.content.Context
 import android.net.Uri
 import android.util.Base64
+import android.util.Log
 import fi.iki.elonen.NanoHTTPD
 import fi.iki.elonen.NanoHTTPD.Method
 import fi.iki.elonen.NanoHTTPD.Response
 import fi.iki.elonen.NanoHTTPD.MIME_PLAINTEXT
 import fi.iki.elonen.NanoHTTPD.newFixedLengthResponse
 import java.io.File
-import java.io.FileInputStream
+import java.io.IOException
+import java.io.InputStream
+import java.io.RandomAccessFile
+import java.util.concurrent.ConcurrentHashMap
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -30,6 +34,47 @@ class FileServer(private val ctx: Context) : NanoHTTPD(Config.PORT) {
     private sealed class Target {
         object Root : Target()
         class Node(val file: File) : Target()
+    }
+
+    /** Okuma hatası veren dosyalar: yol -> bu zamana kadar (ms) isteği reddet. */
+    private val badUntil = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Disk hatasında istisna fırlatmak yerine akışı sessizce bitirir ve dosyayı
+     * kısa süre "dinlenmeye" alır. İstemci (Kodi) aynı bozuk bölgeyi saniyede onlarca
+     * kez tekrar isteyip USB diski zorlamasın diye.
+     */
+    private class SafeStream(
+        private val f: File, start: Long, private var remaining: Long, private val onError: () -> Unit
+    ) : InputStream() {
+        private val raf = RandomAccessFile(f, "r").also { it.seek(start) }
+        private var closed = false
+
+        override fun read(): Int {
+            val one = ByteArray(1)
+            return if (read(one, 0, 1) <= 0) -1 else one[0].toInt() and 0xff
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (closed || remaining <= 0) return -1
+            return try {
+                val n = raf.read(b, off, minOf(len.toLong(), remaining, 65536L).toInt())
+                if (n < 0) -1 else { remaining -= n; n }
+            } catch (e: Exception) {
+                Log.e("HDDShare", "Okuma hatası: ${f.name}", e)
+                onError()
+                close()
+                -1
+            }
+        }
+
+        override fun available(): Int = minOf(remaining, 65536L).toInt()
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            try { raf.close() } catch (_: IOException) {}
+        }
     }
 
     private class Entry(val name: String, val dir: Boolean, val size: Long, val modified: Long)
@@ -238,8 +283,23 @@ class FileServer(private val ctx: Context) : NanoHTTPD(Config.PORT) {
             return r
         }
 
-        val ins = FileInputStream(f)
-        if (start > 0) ins.channel.position(start)
+        val key = f.absolutePath
+        val until = badUntil[key]
+        if (until != null) {
+            if (System.currentTimeMillis() < until) {
+                val r = newFixedLengthResponse(Response.Status.SERVICE_UNAVAILABLE, MIME_PLAINTEXT, "Disk hatası, bekleyin")
+                r.addHeader("Retry-After", "10")
+                return r
+            }
+            badUntil.remove(key)
+        }
+
+        val ins = try {
+            SafeStream(f, start, end - start + 1) { badUntil[key] = System.currentTimeMillis() + BAD_COOLDOWN_MS }
+        } catch (e: Exception) {
+            badUntil[key] = System.currentTimeMillis() + BAD_COOLDOWN_MS
+            return newFixedLengthResponse(Response.Status.SERVICE_UNAVAILABLE, MIME_PLAINTEXT, "Dosya açılamadı")
+        }
 
         val r = newFixedLengthResponse(
             if (partial) Response.Status.PARTIAL_CONTENT else Response.Status.OK,
@@ -248,5 +308,9 @@ class FileServer(private val ctx: Context) : NanoHTTPD(Config.PORT) {
         r.addHeader("Accept-Ranges", "bytes")
         if (partial) r.addHeader("Content-Range", "bytes $start-$end/$len")
         return r
+    }
+
+    companion object {
+        private const val BAD_COOLDOWN_MS = 8000L
     }
 }
