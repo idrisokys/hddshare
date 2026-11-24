@@ -2,7 +2,7 @@ package com.example.hddshare
 
 object Config {
     /** Sunucu portu */
-    val PORT = 8080
+    const val PORT = 8080
 
     /** Şifre koymak istersen ikisini de doldur. PASSWORD boşsa şifresiz çalışır. */
     val USERNAME = ""
@@ -15,5 +15,5 @@ object Config {
     val KEEP_SCREEN_ON = true
 
     /** Diskin takılı olup olmadığı bu aralıkla kontrol edilir (ms). */
-    val CHECK_INTERVAL_MS = 5000L
+    const val CHECK_INTERVAL_MS = 5000L
 }

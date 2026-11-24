@@ -1,11 +1,10 @@
 package com.example.hddshare
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.AlarmManager
 import android.app.PendingIntent
-import android.os.SystemClock
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -16,6 +15,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import fi.iki.elonen.NanoHTTPD
 
@@ -49,6 +49,7 @@ class ShareService : Service() {
     private val mediaReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             // Takma/çıkarma olayında hemen kontrol et (kısa gecikme: mount bitsin)
+            Volumes.invalidate()
             handler?.removeCallbacks(tick)
             handler?.postDelayed(tick, 1000)
         }
@@ -56,13 +57,26 @@ class ShareService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(CHANNEL_ID, "HDD Paylaşım", NotificationManager.IMPORTANCE_MIN)
+        )
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIF_ID, buildNotification(lastText ?: "Disk bekleniyor"))
+        try {
+            startForeground(NOTIF_ID, buildNotification(lastText ?: "Disk bekleniyor"))
+        } catch (e: Exception) {
+            // Android 12+: uygulama arka plandayken foreground servis başlatılamayabilir
+            Log.e(TAG, "startForeground başarısız", e)
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         if (!running) {
             running = true
-            val t = HandlerThread("hddshare-watch")
-            t.start()
+            val t = HandlerThread("hddshare-watch").also { it.start() }
             thread = t
             val h = Handler(t.looper)
             handler = h
@@ -101,44 +115,40 @@ class ShareService : Service() {
             return
         }
 
-        if (wifiLock == null) {
-            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "hddshare:wifi").apply {
-                setReferenceCounted(false)
-            }
-        }
-        wifiLock?.let { if (!it.isHeld) it.acquire() }
+        val wl = wifiLock ?: createWifiLock().also { wifiLock = it }
+        if (!wl.isHeld) wl.acquire()
 
         if (Config.KEEP_CPU_AWAKE) {
-            if (wakeLock == null) {
-                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "hddshare:cpu").apply {
-                    setReferenceCounted(false)
-                }
-            }
-            wakeLock?.let { if (!it.isHeld) it.acquire() }
+            val l = wakeLock ?: newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "hddshare:cpu").also { wakeLock = it }
+            if (!l.isHeld) l.acquire()
         }
 
         // Cihazın (ekran/bekleme modu) uykuya geçmesini engelle; uyku, USB diski ve Wi-Fi'ı da keser
         if (Config.KEEP_SCREEN_ON) {
-            if (screenLock == null) {
-                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                @Suppress("DEPRECATION")
-                screenLock = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "hddshare:screen").apply {
-                    setReferenceCounted(false)
-                }
-            }
-            screenLock?.let { if (!it.isHeld) it.acquire() }
+            @Suppress("DEPRECATION")
+            val l = screenLock ?: newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "hddshare:screen").also { screenLock = it }
+            if (!l.isHeld) l.acquire()
         }
     }
+
+    @Suppress("DEPRECATION")
+    private fun createWifiLock(): WifiManager.WifiLock =
+        applicationContext.getSystemService(WifiManager::class.java)
+            .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "hddshare:wifi")
+            .apply { setReferenceCounted(false) }
+
+    private fun newWakeLock(level: Int, tag: String): PowerManager.WakeLock =
+        getSystemService(PowerManager::class.java)
+            .newWakeLock(level, tag)
+            .apply { setReferenceCounted(false) }
 
     @Synchronized
     private fun stopServer() {
         try { server?.stop() } catch (e: Exception) { Log.e(TAG, "Durdurma hatası", e) }
         server = null
-        wifiLock?.let { if (it.isHeld) it.release() }
-        wakeLock?.let { if (it.isHeld) it.release() }
-        screenLock?.let { if (it.isHeld) it.release() }
+        wifiLock?.takeIf { it.isHeld }?.release()
+        wakeLock?.takeIf { it.isHeld }?.release()
+        screenLock?.takeIf { it.isHeld }?.release()
     }
 
     private fun updateNotification() {
@@ -148,17 +158,12 @@ class ShareService : Service() {
         getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(text))
     }
 
-    private fun buildNotification(text: String): Notification {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(
-            NotificationChannel("share", "HDD Paylaşım", NotificationManager.IMPORTANCE_MIN)
-        )
-        return Notification.Builder(this, "share")
+    private fun buildNotification(text: String): Notification =
+        Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("HDD Paylaş")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_share)
             .build()
-    }
 
     // Uygulama son uygulamalardan kapatılırsa sistem servisi de öldürebilir; 1,5 sn sonra yeniden başlat
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -167,7 +172,7 @@ class ShareService : Service() {
                 this, 1, Intent(this, ShareService::class.java),
                 PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
             )
-            (getSystemService(Context.ALARM_SERVICE) as AlarmManager)
+            getSystemService(AlarmManager::class.java)
                 .set(AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + 1500, pi)
         } catch (e: Exception) {
             Log.e(TAG, "Yeniden başlatma kurulamadı", e)
@@ -188,6 +193,7 @@ class ShareService : Service() {
 
     companion object {
         private const val TAG = "HDDShare"
+        private const val CHANNEL_ID = "share"
         private const val NOTIF_ID = 1
     }
 }

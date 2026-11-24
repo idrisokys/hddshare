@@ -38,7 +38,7 @@ class FileServer(private val ctx: Context) : NanoHTTPD(Config.PORT) {
         return try {
             handle(session)
         } catch (e: Exception) {
-            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Hata: ${e.message}")
+            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Sunucu hatası")
         }
     }
 
@@ -90,7 +90,9 @@ class FileServer(private val ctx: Context) : NanoHTTPD(Config.PORT) {
         val vol = Volumes.list(ctx).firstOrNull { it.name == parts[0] } ?: return null
         val f = if (parts.size == 1) vol else File(vol, parts.drop(1).joinToString("/"))
         if (!f.exists()) return null
-        if (!f.canonicalPath.startsWith(vol.canonicalPath)) return null
+        val root = vol.canonicalPath
+        val real = f.canonicalPath
+        if (real != root && !real.startsWith(root + File.separator)) return null
         return Target.Node(f)
     }
 
@@ -108,11 +110,12 @@ class FileServer(private val ctx: Context) : NanoHTTPD(Config.PORT) {
 
     private fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
 
-    private fun httpDate(ms: Long): String {
-        val f = SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US)
-        f.timeZone = TimeZone.getTimeZone("GMT")
-        return f.format(Date(ms))
+    private val dateFmt = object : ThreadLocal<SimpleDateFormat>() {
+        override fun initialValue() = SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US)
+            .apply { timeZone = TimeZone.getTimeZone("GMT") }
     }
+
+    private fun httpDate(ms: Long): String = dateFmt.get()!!.format(Date(ms))
 
     private fun mimeOf(name: String): String {
         return when (name.substringAfterLast('.', "").lowercase(Locale.ROOT)) {
@@ -239,7 +242,12 @@ class FileServer(private val ctx: Context) : NanoHTTPD(Config.PORT) {
         }
 
         val ins = FileInputStream(f)
-        if (start > 0) ins.channel.position(start)
+        try {
+            if (start > 0) ins.channel.position(start)
+        } catch (e: Exception) {
+            ins.close()
+            throw e
+        }
 
         val r = newFixedLengthResponse(
             if (partial) Response.Status.PARTIAL_CONTENT else Response.Status.OK,
