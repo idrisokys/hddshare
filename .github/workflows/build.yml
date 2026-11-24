@@ -1,0 +1,39 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift sürümü
+        run: swift --version
+
+      - name: Derle
+        run: ./build.sh
+
+      - name: Zip'le
+        run: ditto -c -k --keepParent Kopya.app Kopya-macos-arm64.zip
+
+      - name: Artifact yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kopya-macos-arm64
+          path: Kopya-macos-arm64.zip
+
+      - name: Release oluştur (v* etiketinde)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Kopya-macos-arm64.zip
+          generate_release_notes: true
