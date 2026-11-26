@@ -4,5 +4,5 @@ pluginManagement {
 dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
-rootProject.name = "hdd-share"
+rootProject.name = "TersEkran"
 include(":app")
